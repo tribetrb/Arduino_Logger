@@ -1,0 +1,207 @@
+#include <EtherCard.h>
+#include <stdlib.h>
+#include <AESLib.h>
+
+// ethernet interface mac address, must be unique on the LAN
+byte mymac[] = { 0x74,0x69,0x69,0x2D,0x30,0x31 };
+const char website[] PROGMEM = "192.168.2.241";
+//const char website[] PROGMEM = "*.*.*.*";
+
+//byte Ethernet::buffer[600];
+byte Ethernet::buffer[500];
+
+uint32_t timer;
+Stash stash;
+
+int solarV = 0;
+int batteryV= 1;
+int ampsV= 2;
+float vout = 0.0;
+float vin = 0.0;
+float vin1=0.0;
+float vout1=0.0;
+float vin2=0.0;
+float vout2=0.0;
+float R1 = 4.7;   
+float R2 = 1.005; 
+float R6=4.690;
+float R7= .998;
+float R10=4.7;
+float R11= 4.7;
+float solarPanelVoltage = 0;
+float batteryVoltage =0;
+float chargeAmps =0;        
+char buffer[14];
+char chrBuffer [65];
+
+
+String ARD_ID = "01";
+//Encryption Key
+uint8_t key[] = {0,1,2,3,4,5,6,7,8,9,8,7,6,5,4,3};
+
+String BASE_ID = "7812";
+long request_id = 0;
+char zero_counter = 0;
+char ZERO_COUNT = 2;
+
+//Variables for reading sensor.
+const int numReadings = 30;
+//float readings[numReadings]; // the readings from the analog input
+float reading = 0.0;
+int index = 0; // the index of the current reading
+float total = 0; // the running total
+float average = 0; // the average
+float adcData = 0.0;
+
+
+void setup () {
+  Serial.begin(57600);
+//  Serial.println("\n[webClient]");
+
+  if (ether.begin(sizeof Ethernet::buffer, mymac) == 0) 
+    Serial.println( "Failed to access Ethernet controller");
+  if (!ether.dhcpSetup())
+    Serial.println("DHCP failed");
+
+  ether.printIp("IP:  ", ether.myip);
+  ether.printIp("GW:  ", ether.gwip);  
+  ether.printIp("DNS: ", ether.dnsip);  
+
+//  if (!ether.dnsLookup("ww.google.com"))
+//    Serial.println("DNS failed");
+    ether.hisip[0] = 192;
+    ether.hisip[1] = 168;
+    ether.hisip[2] = 2;
+//    ether.hisip[3] = 2;    
+    ether.hisip[3] = 241;        
+  ether.printIp("SRV: ", ether.hisip);
+  
+  //Create Random Seed.
+  randomSeed(analogRead(A5));   
+  
+  // declaration of pin modes
+  analogReference(DEFAULT);
+  pinMode(solarV, INPUT);
+  pinMode(batteryV, INPUT);
+  pinMode(ampsV, INPUT);  
+ 
+  
+}
+
+float readSensor(float vcc, char dataPin) {
+ total = 0;
+ for(int x=0; x< numReadings; x++ ) {
+   adcData = analogRead(dataPin); //Raw data reading   
+   reading = (adcData-510)*vcc/1024/0.04-0.04;      // For 50A sensor
+//Data processing:510-raw data from analogRead when the input is 0; 5-5v; the first 0.04-0.04V/A(sensitivity); the second 0.04-offset val;   
+//   reading = (adcData-510)*vcc/1024/0.02-0.02;         // For 100A sensor
+   total= total + reading;    
+   delay(10);
+ }
+ Serial.println("ADC Data");
+ Serial.println(adcData);
+ average = total/numReadings; //Smoothing algorithm (http://www.arduino.cc/en/Tutorial/Smoothing)  
+ return average;
+}
+
+long readVcc() {
+  long result;
+  // Read 1.1V reference against AVcc
+  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+  delay(2); // Wait for Vref to settle
+  ADCSRA |= _BV(ADSC); // Convert
+  while (bit_is_set(ADCSRA,ADSC));
+  result = ADCL;
+  result |= ADCH<<8;
+  result = 1125300L / result; // Back-calculate AVcc in mV
+  return result;
+}
+
+
+static void my_callback (byte status, word off, word len) {
+  Serial.println((const char*) Ethernet::buffer + off);
+  
+  if(zero_counter < ZERO_COUNT) {
+    zero_counter++;
+  }else if( zero_counter == ZERO_COUNT) {
+    zero_counter++;
+    request_id = random(100000, 999999);
+  }else {
+     request_id++;
+  } 
+ // Serial.println("Server Reply");
+ // Serial.print(String((const char*)Ethernet::buffer + 170 + off));  
+
+}
+
+void loop () {
+  
+    ether.packetLoop(ether.packetReceive());
+        
+   if (millis() > timer) {
+    timer = millis() + 10000;
+    int HEXAPPKEY_LENGTH = 32;
+    int CRLF_LENGTH = 4;
+    char reqBuff[10];    
+    sprintf(reqBuff, "%010ld", request_id);
+    String data = BASE_ID + ARD_ID + reqBuff;   
+
+    float vcc = readVcc()/1000.0;    
+   
+    // Encryption of AppKey.
+    char cdata[data.length()+1];
+    data.toCharArray(cdata,data.length()+1);
+    aes128_enc_single(key, cdata);
+  
+    solarPanelVoltage = analogRead(solarV);
+    delay(10);
+    solarPanelVoltage = analogRead(solarV);
+    delay(10);
+    vout = (solarPanelVoltage * vcc) / 1024.0;
+    vin = vout / (R2/(R1+R2));
+
+    batteryVoltage = analogRead(batteryV);
+    delay(10);
+    batteryVoltage = analogRead(batteryV);
+    delay(10);
+    vout1=(batteryVoltage * vcc) / 1024.0;
+    vin1= vout1 / (R7/(R6+R7));
+  
+    Serial.println("VCC");    
+    Serial.println(vcc,4);    
+    vin2 = readSensor(vcc, ampsV);     
+    Serial.println("Sensor Output");
+    Serial.println(vin2,4);    
+  
+    String strvin = dtostrf(vin, 7, 2, buffer);
+    String strvin1 = dtostrf(vin1, 7, 2, buffer);
+    String strvin2 = dtostrf(vin2, 7, 2, buffer);
+    strvin.trim();
+    strvin1.trim();
+    strvin2.trim();   
+   
+    //post request
+    String hexdata = "";
+    String tmp = "";
+    
+    // appkey data is HEX encoded in order send it without issues via Software Serial.
+    // Hex encoded data is stored in hexdata.
+    for(int i=0; i<16; i++) {
+      tmp = String((byte)cdata[i],HEX);
+      if (tmp.length() == 1) tmp = "0" + tmp;
+      hexdata = hexdata + tmp;
+    }
+    String params = "v="+strvin+"&b="+strvin1+"&a="+strvin2+ "&AK=" + hexdata;
+//  char *chrBuf = "v=1.34&b=3.56&a=5.78&AK=1ad8e9748bf47c608bf9dbe2997116a9";
+    
+    memset(chrBuffer,0,sizeof(chrBuffer));
+    params.toCharArray(chrBuffer, params.length()+1);    
+
+    Serial.println(params);
+    Serial.println(chrBuffer);    
+    ether.browseUrl(PSTR("/cgi-bin/ardLogger_crypt.py?"),chrBuffer , website, my_callback);       
+
+    Serial.println("REQUESTID");
+    Serial.println(request_id);
+  }
+ }
